@@ -40,7 +40,9 @@ class ErrorBoundary extends Component {
 
 const DEFAULT_CONFIG = {
   weights: { win: 3, draw: 1, loss: 2, goal: 0.5, assist: 0.3, mvp: 2 },
-  confidenceGames: 5,
+  // Precisa de mais jogos para atingir confiança total — evita que 1-2 jogos
+  // bons (ou maus) disparem logo alguém para o topo/fundo da tabela.
+  confidenceGames: 7,
 };
 
 // Inputs com estado local: enquanto escreves, só o próprio campo re-renderiza
@@ -266,6 +268,11 @@ function computeRanking(players, games, config) {
   });
 
   const confGames = config.confidenceGames || 5;
+  // Alarga a distância ao neutro (5) para quem já tem confiança suficiente —
+  // sem isto, mesmo uma sequência excelente (muitas vitórias/golos/assists/MVPs)
+  // ficava sempre "encostada" ao 5 e não se distinguia o suficiente de uma
+  // época mediana.
+  const SCORE_SPREAD = 1.8;
 
   // Média ponderada por recência (jogos recentes pesam mais). Como cada jogo
   // já está em 0-10, esta média fica sempre em 0-10 — não é preciso reescalar
@@ -286,9 +293,11 @@ function computeRanking(players, games, config) {
     });
     r.raw = num / den;
 
-    // Com poucos jogos, puxa o score para o neutro (5) por confiança.
+    // Com poucos jogos, puxa o score para o neutro (5) por confiança
+    // (precisa de confGames jogos para atingir confiança total).
     const confidence = Math.min(1, r.games / confGames);
-    r.norm = confidence * r.raw + (1 - confidence) * 5;
+    const spreadRaw = Math.max(0, Math.min(10, 5 + (r.raw - 5) * SCORE_SPREAD));
+    r.norm = confidence * spreadRaw + (1 - confidence) * 5;
   });
 
   return map;

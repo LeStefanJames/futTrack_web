@@ -2,7 +2,7 @@
 
 React + Vite app, data stored in Supabase (Postgres) so it's shared, free, and no longer tied to a Claude Artifact/plan.
 
-## 1. Create the Supabase project (free)
+## 1. Create the Supabase project (free) 
 
 1. Go to https://supabase.com, sign up (free), and create a new project.
 2. Open **SQL Editor** in the project, paste the contents of [`supabase/schema.sql`](./supabase/schema.sql), and run it. This creates the `app_state` table, sets it fully open (no login required to read/write — same behavior as before), and enables realtime updates.

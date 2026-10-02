@@ -180,6 +180,9 @@ function formatDateTimePT(iso) {
 // componente (curva de retornos decrescentes, satura em vez de crescer sem fim).
 const GOAL_SATURATION = 5;
 const ASSIST_SATURATION = 5;
+// A partir desta diferença de golos, a vitória/derrota conta a 100%; abaixo
+// disso aproxima-se de um empate (não linearmente, ver diffFactor abaixo).
+const GOAL_DIFF_SATURATION = 5;
 
 // Pontuação de um único jogo, em 0-10, como MÉDIA PONDERADA das componentes
 // (resultado, golos, assistências, MVP) em vez de uma soma direta dos pontos.
@@ -187,8 +190,16 @@ const ASSIST_SATURATION = 5;
 // para um valor sem limite superior — cada componente já vem espremida para
 // 0-10 e o peso do utilizador só decide quanto conta na média, não quanto se
 // soma. Com poucos jogos registados, é isto que reduz as oscilações grandes.
-function perGameScore(w, resultKind, goals, assists, mvpVoteShare) {
-  const resultScore = resultKind === "win" ? 10 : resultKind === "draw" ? 5 : 0;
+function perGameScore(w, resultKind, goals, assists, mvpVoteShare, goalDiff) {
+  // Quanto mais apertado o resultado, menos ele conta como vitória/derrota
+  // "a sério" — aproxima-se de um empate (raiz quadrada: sobe depressa com
+  // pouca diferença e depois achata perto da saturação, em vez de linear).
+  const diffFactor = Math.min(1, Math.sqrt((goalDiff || 0) / GOAL_DIFF_SATURATION));
+  // Perder não pode zerar a parte do resultado — sem um piso, qualquer
+  // jogador com mais derrotas do que vitórias ficava sempre muito abaixo da
+  // média mesmo jogando bem individualmente.
+  const resultScore =
+    resultKind === "win" ? 5 + 5 * diffFactor : resultKind === "draw" ? 5 : 5 - 2 * diffFactor;
   const resultWeight = resultKind === "win" ? w.win : resultKind === "draw" ? w.draw : w.loss;
 
   const goalScore = Math.min(10, (10 * Math.sqrt(goals)) / Math.sqrt(GOAL_SATURATION));
@@ -262,8 +273,9 @@ function computeRanking(players, games, config) {
       if (isMvp) m.mvps += 1;
 
       const mvpVoteShare = totalMvpVotes > 0 ? (mvpTally[pid] || 0) / totalMvpVotes : 0;
+      const goalDiff = Math.abs((Number(g.score.a) || 0) - (Number(g.score.b) || 0));
       // Pontuação deste jogo, já em 0-10 (ver perGameScore acima)
-      m.perGame.push(perGameScore(w, resultKind, goals, assists, mvpVoteShare));
+      m.perGame.push(perGameScore(w, resultKind, goals, assists, mvpVoteShare, goalDiff));
     });
   });
 
@@ -293,12 +305,11 @@ function computeRanking(players, games, config) {
     });
     r.raw = num / den;
 
-    // Com poucos jogos, puxa o score para o neutro (5) por confiança
-    // (precisa de confGames jogos para atingir confiança total). Usa raiz
-    // quadrada em vez de linear: a confiança sobe depressa nos primeiros
-    // jogos, para não proteger demasiado quem só tem 1-2 jogos face a quem
-    // já tem um historial maior mas com alguns resultados maus.
-    const confidence = Math.min(1, Math.sqrt(r.games / confGames));
+    // Com poucos jogos, puxa o score para o neutro (5) por confiança.
+    // Fórmula bayesiana (games / (games + confGames)) em vez de linear/raiz:
+    // sobe devagar logo de início — 1 jogo excecional (ex: hat-trick + MVP)
+    // já não chega para destronar quem tem um historial mais longo e sólido.
+    const confidence = Math.min(1, r.games / (r.games + confGames));
     const spreadRaw = Math.max(0, Math.min(10, 5 + (r.raw - 5) * SCORE_SPREAD));
     r.norm = confidence * spreadRaw + (1 - confidence) * 5;
   });
@@ -317,7 +328,7 @@ function marketValue(norm) {
 
 function formatMarketValue(value) {
   const safe = Math.max(0, value || 0);
-  return `${safe.toLocaleString("pt-PT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}€`;
+  return `${safe.toLocaleString("pt-PT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
 }
 
 function balancingScore(playerId, rankingMap) {

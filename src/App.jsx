@@ -183,36 +183,35 @@ const ASSIST_SATURATION = 5;
 // A partir desta diferença de golos, a vitória/derrota conta a 100%; abaixo
 // disso aproxima-se de um empate (não linearmente, ver diffFactor abaixo).
 const GOAL_DIFF_SATURATION = 5;
+// O corretor de golos/assistências/MVP nunca pode valer mais do que esta
+// fração do peso médio de vitória/derrota — garante que o resultado do jogo
+// continua a ser sempre o fator principal, e golos/assists/MVP só ajustam.
+const STAT_CORRECTION_CAP = 0.4;
+// Controla a dificuldade de chegar a 0 ou 10: só desempenhos muito acima/
+// abaixo da média do GRUPO é que se aproximam dos extremos (ver sigmoide mais abaixo).
+const RATING_CURVE_STEEPNESS = 0.55;
 
-// Pontuação de um único jogo, em 0-10, como MÉDIA PONDERADA das componentes
-// (resultado, golos, assistências, MVP) em vez de uma soma direta dos pontos.
-// Isto evita que um jogo excecional (ex: vitória + hat-trick + MVP) dispare
-// para um valor sem limite superior — cada componente já vem espremida para
-// 0-10 e o peso do utilizador só decide quanto conta na média, não quanto se
-// soma. Com poucos jogos registados, é isto que reduz as oscilações grandes.
-function perGameScore(w, resultKind, goals, assists, mvpVoteShare, goalDiff) {
-  // Quanto mais apertado o resultado, menos ele conta como vitória/derrota
-  // "a sério" — aproxima-se de um empate (raiz quadrada: sobe depressa com
-  // pouca diferença e depois achata perto da saturação, em vez de linear).
+// Contributo de UM jogo, COM SINAL (positivo ajuda, negativo prejudica) — já
+// não é 0-10, é só o valor bruto antes de comparar o jogador com o resto do
+// grupo (ver computeRanking). Vitória/derrota mandam, pesadas pela diferença
+// de golos; golos/assistências/MVP são só um corretor por cima, nunca
+// descontam por um jogador não ter pontuado (nem todos marcam golos).
+function perGameSignal(w, resultKind, goals, assists, mvpVoteShare, goalDiff) {
   const diffFactor = Math.min(1, Math.sqrt((goalDiff || 0) / GOAL_DIFF_SATURATION));
-  // Perder não pode zerar a parte do resultado — sem um piso, qualquer
-  // jogador com mais derrotas do que vitórias ficava sempre muito abaixo da
-  // média mesmo jogando bem individualmente.
-  const resultScore =
-    resultKind === "win" ? 5 + 5 * diffFactor : resultKind === "draw" ? 5 : 5 - 2 * diffFactor;
-  const resultWeight = resultKind === "win" ? w.win : resultKind === "draw" ? w.draw : w.loss;
+  const resultSignal =
+    resultKind === "win" ? w.win * diffFactor : resultKind === "loss" ? -w.loss * diffFactor : w.draw;
 
-  const goalScore = Math.min(10, (10 * Math.sqrt(goals)) / Math.sqrt(GOAL_SATURATION));
-  const assistScore = Math.min(10, (10 * Math.sqrt(assists)) / Math.sqrt(ASSIST_SATURATION));
-  // Proporcional aos votos recebidos nesse jogo, não só ao vencedor.
-  const mvpScore = mvpVoteShare * 10;
+  const goalScore01 = Math.min(1, Math.sqrt(goals / GOAL_SATURATION));
+  const assistScore01 = Math.min(1, Math.sqrt(assists / ASSIST_SATURATION));
+  const statWeightSum = w.goal + w.assist + w.mvp;
+  const statShare =
+    statWeightSum > 0
+      ? (w.goal * goalScore01 + w.assist * assistScore01 + w.mvp * mvpVoteShare) / statWeightSum
+      : 0;
+  const resultMagnitude = (w.win + w.loss) / 2 || 1;
+  const statBonus = statShare * STAT_CORRECTION_CAP * resultMagnitude;
 
-  const totalWeight = resultWeight + w.goal + w.assist + w.mvp;
-  if (totalWeight <= 0) return 5;
-  return (
-    (resultWeight * resultScore + w.goal * goalScore + w.assist * assistScore + w.mvp * mvpScore) /
-    totalWeight
-  );
+  return resultSignal + statBonus;
 }
 
 function computeRanking(players, games, config) {
@@ -274,28 +273,26 @@ function computeRanking(players, games, config) {
 
       const mvpVoteShare = totalMvpVotes > 0 ? (mvpTally[pid] || 0) / totalMvpVotes : 0;
       const goalDiff = Math.abs((Number(g.score.a) || 0) - (Number(g.score.b) || 0));
-      // Pontuação deste jogo, já em 0-10 (ver perGameScore acima)
-      m.perGame.push(perGameScore(w, resultKind, goals, assists, mvpVoteShare, goalDiff));
+      m.perGame.push(perGameSignal(w, resultKind, goals, assists, mvpVoteShare, goalDiff));
     });
   });
 
-  const confGames = config.confidenceGames || 5;
-  // Alarga a distância ao neutro (5) para quem já tem confiança suficiente —
-  // sem isto, mesmo uma sequência excelente (muitas vitórias/golos/assists/MVPs)
-  // ficava sempre "encostada" ao 5 e não se distinguia o suficiente de uma
-  // época mediana.
-  const SCORE_SPREAD = 1.8;
+  // Jogos até o score de um jogador deixar de ser suavizado (configurável em
+  // Configurações, "Jogos até estabilizar"). Abaixo de 60% desse valor a
+  // suavização é forte; entre esse ponto e o total, é ligeira; a partir daí,
+  // o valor real do jogador é usado diretamente, sem suavização nenhuma.
+  const confGames = Math.max(1, config.confidenceGames || 5);
+  const softGames = Math.max(0.5, confGames * 0.6);
+  function gameConfidence(played) {
+    if (played >= confGames) return 1;
+    if (played <= softGames) return (played / softGames) * 0.5;
+    return 0.5 + ((played - softGames) / (confGames - softGames)) * 0.5;
+  }
 
-  // Média ponderada por recência (jogos recentes pesam mais). Como cada jogo
-  // já está em 0-10, esta média fica sempre em 0-10 — não é preciso reescalar
-  // com base no melhor jogador atual, o que antes fazia a pontuação de toda a
-  // gente oscilar sempre que o topo da tabela mudava.
-  Object.values(map).forEach((r) => {
+  // Média ponderada por recência (jogos recentes pesam mais que os antigos).
+  const withGames = Object.values(map).filter((r) => r.perGame.length > 0);
+  withGames.forEach((r) => {
     const n = r.perGame.length;
-    if (n === 0) {
-      r.norm = 0;
-      return;
-    }
     let num = 0;
     let den = 0;
     r.perGame.forEach((pts, i) => {
@@ -304,14 +301,29 @@ function computeRanking(players, games, config) {
       den += wt;
     });
     r.raw = num / den;
+  });
+  if (withGames.length === 0) return map;
 
-    // Com poucos jogos, puxa o score para o neutro (5) por confiança.
-    // Fórmula bayesiana (games / (games + confGames)) em vez de linear/raiz:
-    // sobe devagar logo de início — 1 jogo excecional (ex: hat-trick + MVP)
-    // já não chega para destronar quem tem um historial mais longo e sólido.
-    const confidence = Math.min(1, r.games / (r.games + confGames));
-    const spreadRaw = Math.max(0, Math.min(10, 5 + (r.raw - 5) * SCORE_SPREAD));
-    r.norm = confidence * spreadRaw + (1 - confidence) * 5;
+  // Com poucos jogos, puxa o valor para a média do GRUPO (não para um número
+  // fixo) — a suavização reflete sempre o nível real deste grupo de jogadores.
+  const poolMean = withGames.reduce((s, r) => s + r.raw, 0) / withGames.length;
+  withGames.forEach((r) => {
+    const confidence = gameConfidence(r.games);
+    r.smoothed = confidence * r.raw + (1 - confidence) * poolMean;
+  });
+
+  // Rating final = posição deste jogador face à média/dispersão do GRUPO,
+  // não um valor absoluto — por isso o pior fica perto de 0, o melhor perto
+  // de 10, a maioria fica no meio, e a distância exata reflete a diferença
+  // real de desempenho (não só a posição/ordem no ranking).
+  const groupMean = withGames.reduce((s, r) => s + r.smoothed, 0) / withGames.length;
+  const variance = withGames.reduce((s, r) => s + (r.smoothed - groupMean) ** 2, 0) / withGames.length;
+  const stdDev = Math.sqrt(variance);
+  withGames.forEach((r) => {
+    const z = stdDev > 0 ? (r.smoothed - groupMean) / stdDev : 0;
+    // Sigmoide: achata perto de 0 e de 10 — esses extremos só saem com
+    // desempenhos muito destacados acima/abaixo do grupo (difícil de atingir).
+    r.norm = 10 / (1 + Math.exp(-RATING_CURVE_STEEPNESS * z));
   });
 
   return map;

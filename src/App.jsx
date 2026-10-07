@@ -434,7 +434,17 @@ function gerarEquipas(convocadoIds, players, rankingMap) {
   });
   ({ a: lineA, b: lineB } = twoOptBalance(lineA, lineB, scoreFn));
 
-  return { teamA: [...gkA, ...lineA], teamB: [...gkB, ...lineB] };
+  let teamA = [...gkA, ...lineA];
+  let teamB = [...gkB, ...lineB];
+  // Sem isto, o jogador mais bem classificado acaba sempre do lado "A"
+  // (Pretos), porque o preenchimento guloso acima começa sempre por aí.
+  // Baralhamos ao calhas qual dos dois lados fica com "A" para que o topo
+  // do ranking não calhe sempre na mesma equipa.
+  if (Math.random() < 0.5) {
+    [teamA, teamB] = [teamB, teamA];
+  }
+
+  return { teamA, teamB };
 }
 
 function within(dateStr, from, to) {
@@ -466,6 +476,7 @@ function AppRoot() {
   const [votingAs, setVotingAs] = useState(null);
   const [voteChoice, setVoteChoice] = useState(null);
   const [gkWarning, setGkWarning] = useState("");
+  const [rankingView, setRankingView] = useState("full");
 
   const [filters, setFilters] = useState({
     from: "",
@@ -801,6 +812,12 @@ function AppRoot() {
     .map((p) => ({ player: p, ...rankingMap[p.id] }))
     .sort((a, b) => b.norm - a.norm || b.games - a.games);
 
+  const reducedRankingMinGames = Math.max(1, config.confidenceGames || 5);
+  const displayedRanking =
+    rankingView === "reduzido"
+      ? ranking.filter((r) => r.games >= reducedRankingMinGames)
+      : ranking;
+
   const sortedGames = [...games].sort((a, b) => (a.date < b.date ? 1 : -1));
 
   return (
@@ -967,7 +984,16 @@ function AppRoot() {
         {tab === "ranking" && (
           <section className="panel">
             <h2>Ranking geral</h2>
+            <button
+              className="btn btnGhost"
+              onClick={() => setRankingView((v) => (v === "reduzido" ? "full" : "reduzido"))}
+            >
+              {rankingView === "reduzido" ? "Mostrar Ranking Completo" : "Mostrar Ranking Reduzido"}
+            </button>
             <p className="hint">Score de 0 a 10, calculado a partir de vitórias, empates, derrotas, golos, assistências e prémios de MVP.</p>
+            <p className="scrollHint">
+              <span className="scrollHintArrow">➜</span> Desliza a tabela para o lado para veres mais colunas (Score, Valor de Mercado...)
+            </p>
             <div className="tableWrap">
               <table className="table">
                 <thead>
@@ -986,7 +1012,7 @@ function AppRoot() {
                   </tr>
                 </thead>
                 <tbody>
-                  {ranking.map((r, i) => (
+                  {displayedRanking.map((r, i) => (
                     <tr key={r.player.id} className={r.player.active === false ? "rowInactive" : ""}>
                       <td>{i + 1}</td>
                       <td>
@@ -1008,6 +1034,13 @@ function AppRoot() {
                     <tr>
                       <td colSpan={11} className="emptyState">
                         Ainda não há jogadores.
+                      </td>
+                    </tr>
+                  )}
+                  {ranking.length > 0 && displayedRanking.length === 0 && (
+                    <tr>
+                      <td colSpan={11} className="emptyState">
+                        Ainda nenhum jogador atingiu o mínimo de {reducedRankingMinGames} jogos.
                       </td>
                     </tr>
                   )}
@@ -2040,7 +2073,45 @@ html, body {
 
 .statInput { width: 55px; }
 
-.tableWrap { overflow-x: auto; }
+.tableWrap {
+  overflow-x: auto;
+  /* Sombras nas bordas esquerda/direita indicam que há mais colunas para lá
+     da área visível; desaparecem sozinhas quando já não há mais para
+     deslizar nesse sentido (truque com background-attachment local/scroll). */
+  background:
+    linear-gradient(to right, #14211D 30%, rgba(20, 33, 29, 0)),
+    linear-gradient(to right, rgba(20, 33, 29, 0), #14211D 70%) 100% 0,
+    radial-gradient(farthest-side at 0 50%, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)),
+    radial-gradient(farthest-side at 100% 50%, rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0)) 100% 0;
+  background-repeat: no-repeat;
+  background-color: #14211D;
+  background-size: 30px 100%, 30px 100%, 12px 100%, 12px 100%;
+  background-attachment: local, local, scroll, scroll;
+}
+
+.scrollHint {
+  display: none;
+  align-items: center;
+  gap: 0.35rem;
+  color: #E8A33D;
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin: 0.4rem 0 0.6rem 0;
+}
+
+.scrollHintArrow {
+  display: inline-block;
+  animation: scrollHintBounce 1.2s ease-in-out infinite;
+}
+
+@keyframes scrollHintBounce {
+  0%, 100% { transform: translateX(0); }
+  50% { transform: translateX(6px); }
+}
+
+@media (max-width: 680px) {
+  .scrollHint { display: flex; }
+}
 
 .table {
   width: 100%;

@@ -45,6 +45,13 @@ const DEFAULT_CONFIG = {
   confidenceGames: 7,
 };
 
+// Duas formas de tornar o Ranking usável em ecrãs pequenos, à escolha:
+// "frozen" fixa as colunas #/foto/jogador à esquerda enquanto deslizas para
+// ver o resto (J, V, E, D, Score...); "cards" troca a tabela por um cartão
+// empilhado por jogador (sem scroll horizontal nenhum). Muda este valor e
+// recarrega a página para experimentar o outro.
+const RANKING_MOBILE_LAYOUT = "frozen"; // "frozen" | "cards"
+
 // Inputs com estado local: enquanto escreves, só o próprio campo re-renderiza
 // (rápido). O valor só é gravado na app (e na rede) quando sais do campo —
 // evita gravar e recalcular tudo a cada tecla, que estava a causar lentidão
@@ -88,6 +95,48 @@ function LocalNumberInput({ value, onCommit, ...rest }) {
 
 function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+}
+
+// Lê o ficheiro escolhido, recorta ao centro para um quadrado e compacta para
+// JPEG pequeno — assim a foto fica com qualidade aceitável sem engordar o
+// blob JSON que é gravado (e sincronizado em tempo real) no Supabase.
+function resizeImageToDataURL(file, size = 240, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(reader.error);
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("imagem inválida"));
+      img.onload = () => {
+        const srcSize = Math.min(img.width, img.height);
+        const sx = (img.width - srcSize) / 2;
+        const sy = (img.height - srcSize) / 2;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.drawImage(img, sx, sy, srcSize, srcSize, 0, 0, size, size);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// Ícone genérico (silhueta) quando o jogador ainda não tem foto.
+function PlayerAvatar({ photo, size = 32, alt = "", className = "" }) {
+  return (
+    <span className={"avatar " + className} style={{ width: size, height: size }}>
+      {photo ? (
+        <img src={photo} alt={alt} />
+      ) : (
+        <svg viewBox="0 0 24 24" width={Math.round(size * 0.58)} height={Math.round(size * 0.58)} fill="currentColor">
+          <path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10Zm0 2c-4.42 0-8 2.24-8 5v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2c0-2.76-3.58-5-8-5Z" />
+        </svg>
+      )}
+    </span>
+  );
 }
 
 function todayISO() {
@@ -469,8 +518,10 @@ function AppRoot() {
 
   const [newPlayerName, setNewPlayerName] = useState("");
   const [newPlayerGK, setNewPlayerGK] = useState(false);
+  const [newPlayerPhoto, setNewPlayerPhoto] = useState(null);
   const [showInactive, setShowInactive] = useState(false);
   const [confirmRemoveId, setConfirmRemoveId] = useState(null);
+  const [enlargedPlayer, setEnlargedPlayer] = useState(null);
 
   const [openGameId, setOpenGameId] = useState(null);
   const [votingAs, setVotingAs] = useState(null);
@@ -601,13 +652,27 @@ function AppRoot() {
   }
 
   // ---- Jogadores ----
+  function handlePhotoFile(e, onResult) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    resizeImageToDataURL(file)
+      .then(onResult)
+      .catch((err) => console.error("f-tracker: falha ao processar foto", err));
+  }
+
   function addPlayer() {
     const name = newPlayerName.trim();
     if (!name) return;
-    const p = { id: uid(), name, isGK: newPlayerGK, active: true };
+    const p = { id: uid(), name, isGK: newPlayerGK, active: true, photo: newPlayerPhoto || null };
     persist({ ...data, players: [...players, p] });
     setNewPlayerName("");
     setNewPlayerGK(false);
+    setNewPlayerPhoto(null);
+  }
+
+  function updatePlayerPhoto(id, photo) {
+    persist({ ...data, players: players.map((p) => (p.id === id ? { ...p, photo } : p)) });
   }
 
   function toggleActive(id, active) {
@@ -855,6 +920,15 @@ function AppRoot() {
             <div className="card">
               <h2>Adicionar jogador</h2>
               <div className="fieldRow">
+                <label className="avatarPicker" title="Escolher foto">
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="avatarPickerInput"
+                    onChange={(e) => handlePhotoFile(e, (url) => setNewPlayerPhoto(url))}
+                  />
+                  <PlayerAvatar photo={newPlayerPhoto} size={40} alt="" />
+                </label>
                 <input
                   className="input"
                   placeholder="Nome do jogador"
@@ -894,12 +968,28 @@ function AppRoot() {
                   .filter((p) => showInactive || p.active !== false)
                   .map((p) => (
                     <li key={p.id} className={"playerRow" + (p.active === false ? " playerInactive" : "")}>
-                      <span className="playerName">
-                        {p.name}
-                        {p.isGK && <span className="tagGK">GR</span>}
-                        {p.active === false && <span className="tagInactive">inativo</span>}
-                      </span>
+                      <div className="playerInfo">
+                        <label className="avatarPicker" title="Alterar foto">
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="avatarPickerInput"
+                            onChange={(e) => handlePhotoFile(e, (url) => updatePlayerPhoto(p.id, url))}
+                          />
+                          <PlayerAvatar photo={p.photo} size={40} alt={p.name} />
+                        </label>
+                        <span className="playerName">
+                          <span className="playerNameText">{p.name}</span>
+                          {p.isGK && <span className="tagGK">GR</span>}
+                          {p.active === false && <span className="tagInactive">inativo</span>}
+                        </span>
+                      </div>
                       <span className="playerActions">
+                        {p.photo && (
+                          <button className="btn btnGhost" onClick={() => updatePlayerPhoto(p.id, null)}>
+                            Remover foto
+                          </button>
+                        )}
                         <button className="btn btnGhost" onClick={() => toggleGK(p.id)}>
                           {p.isGK ? "Remover GR" : "Marcar GR"}
                         </button>
@@ -991,15 +1081,15 @@ function AppRoot() {
               {rankingView === "reduzido" ? "Mostrar Ranking Completo" : "Mostrar Ranking Reduzido"}
             </button>
             <p className="hint">Score de 0 a 10, calculado a partir de vitórias, empates, derrotas, golos, assistências e prémios de MVP.</p>
-            <p className="scrollHint">
-              <span className="scrollHintArrow">➜</span> Desliza a tabela para o lado para veres mais colunas (Score, Valor de Mercado...)
-            </p>
-            <div className="tableWrap">
-              <table className="table">
+            <div className={"tableWrap" + (RANKING_MOBILE_LAYOUT === "cards" ? " tableWrapCardsMode" : "")}>
+              <table className={"table" + (RANKING_MOBILE_LAYOUT === "frozen" ? " rankingFrozen" : "")}>
                 <thead>
                   <tr>
                     <th>#</th>
+                    <th>Foto</th>
                     <th>Jogador</th>
+                    <th>Score</th>
+                    <th>Valor de Mercado</th>
                     <th>J</th>
                     <th>V</th>
                     <th>E</th>
@@ -1007,18 +1097,28 @@ function AppRoot() {
                     <th>Golos</th>
                     <th>Assist.</th>
                     <th>MVP</th>
-                    <th>Score</th>
-                    <th>Valor de Mercado</th>
                   </tr>
                 </thead>
                 <tbody>
                   {displayedRanking.map((r, i) => (
                     <tr key={r.player.id} className={r.player.active === false ? "rowInactive" : ""}>
                       <td>{i + 1}</td>
+                      <td className="avatarCell">
+                        <button
+                          type="button"
+                          className="avatarBtn"
+                          onClick={() => setEnlargedPlayer(r.player)}
+                          aria-label={`Ver foto de ${r.player.name}`}
+                        >
+                          <PlayerAvatar photo={r.player.photo} size={32} alt={r.player.name} />
+                        </button>
+                      </td>
                       <td>
                         {r.player.name}
                         {r.player.isGK && <span className="tagGK">GR</span>}
                       </td>
+                      <td className="scoreCell">{r.norm.toFixed(1)}</td>
+                      <td className="scoreCell">{formatMarketValue(marketValue(r.norm))}</td>
                       <td>{r.games}</td>
                       <td>{r.wins}</td>
                       <td>{r.draws}</td>
@@ -1026,20 +1126,18 @@ function AppRoot() {
                       <td>{r.goals}</td>
                       <td>{r.assists}</td>
                       <td>{r.mvps}</td>
-                      <td className="scoreCell">{r.norm.toFixed(1)}</td>
-                      <td className="scoreCell">{formatMarketValue(marketValue(r.norm))}</td>
                     </tr>
                   ))}
                   {ranking.length === 0 && (
                     <tr>
-                      <td colSpan={11} className="emptyState">
+                      <td colSpan={12} className="emptyState">
                         Ainda não há jogadores.
                       </td>
                     </tr>
                   )}
                   {ranking.length > 0 && displayedRanking.length === 0 && (
                     <tr>
-                      <td colSpan={11} className="emptyState">
+                      <td colSpan={12} className="emptyState">
                         Ainda nenhum jogador atingiu o mínimo de {reducedRankingMinGames} jogos.
                       </td>
                     </tr>
@@ -1047,6 +1145,50 @@ function AppRoot() {
                 </tbody>
               </table>
             </div>
+
+            {RANKING_MOBILE_LAYOUT === "cards" && (
+              <ul className="rankingCards">
+                {displayedRanking.map((r, i) => (
+                  <li
+                    key={r.player.id}
+                    className={"rankingCard" + (r.player.active === false ? " rowInactive" : "")}
+                  >
+                    <div className="rankingCardHeader">
+                      <span className="rankingCardPos">#{i + 1}</span>
+                      <button
+                        type="button"
+                        className="avatarBtn"
+                        onClick={() => setEnlargedPlayer(r.player)}
+                        aria-label={`Ver foto de ${r.player.name}`}
+                      >
+                        <PlayerAvatar photo={r.player.photo} size={36} alt={r.player.name} />
+                      </button>
+                      <span className="rankingCardName">
+                        {r.player.name}
+                        {r.player.isGK && <span className="tagGK">GR</span>}
+                      </span>
+                      <span className="rankingCardScore">{r.norm.toFixed(1)}</span>
+                    </div>
+                    <div className="rankingCardStats">
+                      <span><b>{formatMarketValue(marketValue(r.norm))}</b> valor</span>
+                      <span><b>{r.games}</b> J</span>
+                      <span><b>{r.wins}</b> V</span>
+                      <span><b>{r.draws}</b> E</span>
+                      <span><b>{r.losses}</b> D</span>
+                      <span><b>{r.goals}</b> golos</span>
+                      <span><b>{r.assists}</b> assist.</span>
+                      <span><b>{r.mvps}</b> MVP</span>
+                    </div>
+                  </li>
+                ))}
+                {ranking.length === 0 && <li className="emptyState">Ainda não há jogadores.</li>}
+                {ranking.length > 0 && displayedRanking.length === 0 && (
+                  <li className="emptyState">
+                    Ainda nenhum jogador atingiu o mínimo de {reducedRankingMinGames} jogos.
+                  </li>
+                )}
+              </ul>
+            )}
           </section>
         )}
 
@@ -1297,6 +1439,20 @@ function AppRoot() {
           </section>
         )}
       </main>
+
+      {enlargedPlayer && (
+        <div className="lightboxOverlay" onClick={() => setEnlargedPlayer(null)}>
+          <div className="lightboxContent">
+            <PlayerAvatar
+              photo={enlargedPlayer.photo}
+              size={220}
+              alt={enlargedPlayer.name}
+              className="avatarLarge"
+            />
+            <div className="lightboxName">{enlargedPlayer.name}</div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1403,6 +1559,7 @@ function GameCard(props) {
                           checked={g.convocados.includes(p.id)}
                           onChange={() => onToggleConvocado(p.id)}
                         />
+                        <PlayerAvatar photo={p.photo} size={24} alt={p.name} />
                         {p.name}
                         {p.isGK && <span className="tagGK">GR</span>}
                       </label>
@@ -1500,7 +1657,16 @@ function GameCard(props) {
                     <tbody>
                       {g.convocados.map((pid) => (
                         <tr key={pid}>
-                          <td>{playerName(pid)}</td>
+                          <td>
+                            <span className="nameWithAvatar">
+                              <PlayerAvatar
+                                photo={(players.find((x) => x.id === pid) || {}).photo}
+                                size={22}
+                                alt={playerName(pid)}
+                              />
+                              {playerName(pid)}
+                            </span>
+                          </td>
                           <td>
                             <LocalNumberInput
                               className="input statInput"
@@ -1575,7 +1741,14 @@ function GameCard(props) {
                             const voted = g.mvpVotes.some((v) => v.voterId === pid);
                             return (
                               <li key={pid} className="voteRow">
-                                <span>{playerName(pid)}</span>
+                                <span className="nameWithAvatar">
+                                  <PlayerAvatar
+                                    photo={(players.find((x) => x.id === pid) || {}).photo}
+                                    size={22}
+                                    alt={playerName(pid)}
+                                  />
+                                  {playerName(pid)}
+                                </span>
                                 {voted ? (
                                   <span className="votedTag">✔ votou</span>
                                 ) : votingAs === pid ? (
@@ -1699,8 +1872,9 @@ function GameCard(props) {
                 }}
                 onClick={() => onTapPlayer(pid)}
               >
-                <span>
-                  {playerName(pid)}
+                <span className="teamPlayerInfo">
+                  <PlayerAvatar photo={p && p.photo} size={22} alt={playerName(pid)} />
+                  <span className="teamPlayerName">{playerName(pid)}</span>
                   {p && p.isGK && <span className="tagGK">GR</span>}
                 </span>
                 {editable && <span className="dragHandle">⠿</span>}
@@ -1937,9 +2111,80 @@ html, body {
 
 .playerInactive { opacity: 0.5; }
 
-.playerName { display: flex; align-items: center; gap: 0.4rem; }
+.playerInfo { display: flex; align-items: center; gap: 0.6rem; flex: 1; min-width: 0; }
+
+.playerName { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+
+.playerNameText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .playerActions { display: flex; gap: 0.4rem; flex-wrap: wrap; }
+
+/* Em ecrãs estreitos força sempre o mesmo layout de 2 linhas (foto+nome,
+   depois ações) em vez de às vezes 1 linha às vezes 2 consoante o tamanho
+   do nome — isso é o que estava a deixar a lista com alturas inconsistentes. */
+@media (max-width: 680px) {
+  .playerInfo { flex: 1 1 100%; }
+  .playerActions { flex: 1 1 100%; justify-content: flex-end; }
+}
+
+.avatar {
+  border-radius: 50%;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #24352C;
+  color: #4C5D53;
+  flex-shrink: 0;
+}
+
+.avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.avatarPicker { cursor: pointer; display: inline-flex; }
+
+.avatarPickerInput { display: none; }
+
+.avatarBtn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  display: inline-flex;
+  border-radius: 50%;
+}
+
+.avatarCell { width: 1%; }
+
+.nameWithAvatar { display: inline-flex; align-items: center; gap: 0.4rem; }
+
+.lightboxOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 15, 13, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  cursor: pointer;
+  padding: 2rem;
+}
+
+.lightboxContent {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.avatarLarge { box-shadow: 0 0 0 4px rgba(232, 163, 61, 0.35); }
+
+.lightboxName {
+  color: #F2EFE4;
+  font-family: 'Bebas Neue', sans-serif;
+  font-size: 1.4rem;
+  letter-spacing: 0.02em;
+}
 
 .tagGK {
   background: #2E8B87;
@@ -2040,6 +2285,10 @@ html, body {
   font-size: 0.88rem;
 }
 
+.teamPlayerInfo { display: flex; align-items: center; gap: 0.4rem; min-width: 0; }
+
+.teamPlayerName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .teamPlayerEditable {
   cursor: pointer;
   border-radius: 4px;
@@ -2089,29 +2338,71 @@ html, body {
   background-attachment: local, local, scroll, scroll;
 }
 
-.scrollHint {
-  display: none;
-  align-items: center;
-  gap: 0.35rem;
-  color: #E8A33D;
-  font-size: 0.82rem;
-  font-weight: 600;
-  margin: 0.4rem 0 0.6rem 0;
+/* Modo "frozen" (RANKING_MOBILE_LAYOUT): em ecrãs pequenos fixa #, foto e
+   nome à esquerda enquanto o resto da tabela desliza por baixo — como as
+   larguras das 3 primeiras colunas são fixas dá para calcular o left de
+   cada uma sem precisar de JS. */
+@media (max-width: 680px) {
+  .table.rankingFrozen th:nth-child(1),
+  .table.rankingFrozen td:nth-child(1) {
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: #14211D;
+    width: 24px;
+  }
+  .table.rankingFrozen th:nth-child(2),
+  .table.rankingFrozen td:nth-child(2) {
+    position: sticky;
+    left: 24px;
+    z-index: 2;
+    background: #14211D;
+    width: 44px;
+  }
+  .table.rankingFrozen th:nth-child(3),
+  .table.rankingFrozen td:nth-child(3) {
+    position: sticky;
+    left: 68px;
+    z-index: 2;
+    background: #14211D;
+    box-shadow: 6px 0 8px -6px rgba(0, 0, 0, 0.5);
+  }
 }
 
-.scrollHintArrow {
-  display: inline-block;
-  animation: scrollHintBounce 1.2s ease-in-out infinite;
-}
-
-@keyframes scrollHintBounce {
-  0%, 100% { transform: translateX(0); }
-  50% { transform: translateX(6px); }
-}
+/* Modo "cards" (RANKING_MOBILE_LAYOUT): em ecrãs pequenos a tabela some e
+   entra uma lista de cartões empilhados, sem scroll horizontal nenhum. */
+.rankingCards { display: none; list-style: none; margin: 0.5rem 0 0 0; padding: 0; flex-direction: column; gap: 0.5rem; }
 
 @media (max-width: 680px) {
-  .scrollHint { display: flex; }
+  .rankingCards { display: flex; }
+  .tableWrapCardsMode { display: none; }
 }
+
+.rankingCard {
+  background: #1C2A24;
+  border: 1px solid #2A3831;
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+}
+
+.rankingCardHeader { display: flex; align-items: center; gap: 0.5rem; }
+
+.rankingCardPos { color: #93A399; font-family: 'Bebas Neue', sans-serif; font-size: 1.1rem; width: 1.6rem; }
+
+.rankingCardName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+
+.rankingCardScore { font-family: 'Bebas Neue', sans-serif; font-size: 1.2rem; color: #E8A33D; }
+
+.rankingCardStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.8rem;
+  margin-top: 0.45rem;
+  color: #B7C4BB;
+  font-size: 0.78rem;
+}
+
+.rankingCardStats b { color: #F2EFE4; }
 
 .table {
   width: 100%;

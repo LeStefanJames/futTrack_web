@@ -50,7 +50,7 @@ const DEFAULT_CONFIG = {
 // ver o resto (J, V, E, D, Score...); "cards" troca a tabela por um cartão
 // empilhado por jogador (sem scroll horizontal nenhum). Muda este valor e
 // recarrega a página para experimentar o outro.
-const RANKING_MOBILE_LAYOUT = "frozen"; // "frozen" | "cards"
+const RANKING_MOBILE_LAYOUT = "cards"; // "frozen" | "cards"
 
 // Inputs com estado local: enquanto escreves, só o próprio campo re-renderiza
 // (rápido). O valor só é gravado na app (e na rede) quando sais do campo —

@@ -36,6 +36,13 @@ drop policy if exists "app_state_update_anon" on app_state;
 create policy "app_state_update_anon" on app_state
   for update using (true) with check (true);
 
+-- Required since Oct 30 2025: Supabase no longer auto-grants Data API access to
+-- new tables, so re-running this script (fresh project/branch/db reset) needs
+-- explicit grants or the API returns "permission denied".
+grant select, insert, update on public.app_state to anon;
+grant select, insert, update, delete on public.app_state to authenticated;
+grant select, insert, update, delete on public.app_state to service_role;
+
 -- Enables realtime change notifications (used so every open tab updates live).
 alter publication supabase_realtime add table app_state;
 

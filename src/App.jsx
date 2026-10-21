@@ -50,7 +50,7 @@ const DEFAULT_CONFIG = {
 // ver o resto (J, V, E, D, Score...); "cards" troca a tabela por um cartão
 // empilhado por jogador (sem scroll horizontal nenhum). Muda este valor e
 // recarrega a página para experimentar o outro.
-const RANKING_MOBILE_LAYOUT = "cards"; // "frozen" | "cards"
+const RANKING_MOBILE_LAYOUT = "frozen"; // "frozen" | "cards"
 
 // Inputs com estado local: enquanto escreves, só o próprio campo re-renderiza
 // (rápido). O valor só é gravado na app (e na rede) quando sais do campo —
@@ -2549,11 +2549,16 @@ html, body {
 
 .rankingCardHeader { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 
-.rankingCardPos { color: #93A399; font-family: 'Bebas Neue', sans-serif; font-size: 1.1rem; width: 1.6rem; }
+.rankingCardPos { color: #93A399; font-family: 'Bebas Neue', sans-serif; font-size: 1.1rem; width: 1.6rem; flex-shrink: 0; }
 
-.rankingCardName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.rankingCardHeader .avatarBtn { flex-shrink: 0; }
 
-.rankingCardHighlights { display: flex; gap: 0.9rem; width: 100%; justify-content: flex-end; }
+/* Cresce para ocupar o espaço livre na linha do nome, mas não encolhe abaixo de
+   min-width — abaixo disso a linha quebra e os destaques (rankingCardHighlights)
+   passam para a linha seguinte, em vez de sobrepor o nome. */
+.rankingCardName { flex: 1 1 auto; min-width: 6rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+
+.rankingCardHighlights { display: flex; gap: 0.9rem; margin-left: auto; justify-content: flex-end; }
 
 .rankingCardHighlight { display: flex; flex-direction: column; align-items: flex-end; }
 

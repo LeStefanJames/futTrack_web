@@ -279,6 +279,7 @@ function computeRanking(players, games, config) {
       wins: 0,
       draws: 0,
       losses: 0,
+      goalDiff: 0,
       goals: 0,
       assists: 0,
       mvps: 0,
@@ -326,7 +327,11 @@ function computeRanking(players, games, config) {
       if (isMvp) m.mvps += 1;
 
       const mvpVoteShare = totalMvpVotes > 0 ? (mvpTally[pid] || 0) / totalMvpVotes : 0;
-      const goalDiff = Math.abs((Number(g.score.a) || 0) - (Number(g.score.b) || 0));
+      const scoreA = Number(g.score.a) || 0;
+      const scoreB = Number(g.score.b) || 0;
+      const goalDiff = Math.abs(scoreA - scoreB);
+      if (inA) m.goalDiff += scoreA - scoreB;
+      else if (inB) m.goalDiff += scoreB - scoreA;
       m.perGame.push(perGameSignal(w, resultKind, goals, assists, mvpVoteShare, goalDiff));
     });
   });
@@ -396,6 +401,11 @@ function marketValue(norm) {
 function formatMarketValue(value) {
   const safe = Math.max(0, value || 0);
   return `${safe.toLocaleString("pt-PT", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €`;
+}
+
+function formatGoalDiff(value) {
+  const v = value || 0;
+  return v > 0 ? `+${v}` : `${v}`;
 }
 
 function balancingScore(playerId, rankingMap) {
@@ -1125,6 +1135,7 @@ function AppRoot() {
                     <th>V</th>
                     <th>E</th>
                     <th>D</th>
+                    <th>GD</th>
                     <th>Golos</th>
                     <th>Assist.</th>
                     <th>MVP</th>
@@ -1154,6 +1165,7 @@ function AppRoot() {
                       <td>{r.wins}</td>
                       <td>{r.draws}</td>
                       <td>{r.losses}</td>
+                      <td>{formatGoalDiff(r.goalDiff)}</td>
                       <td>{r.goals}</td>
                       <td>{r.assists}</td>
                       <td>{r.mvps}</td>
@@ -1161,14 +1173,14 @@ function AppRoot() {
                   ))}
                   {ranking.length === 0 && (
                     <tr>
-                      <td colSpan={12} className="emptyState">
+                      <td colSpan={13} className="emptyState">
                         Ainda não há jogadores.
                       </td>
                     </tr>
                   )}
                   {ranking.length > 0 && displayedRanking.length === 0 && (
                     <tr>
-                      <td colSpan={12} className="emptyState">
+                      <td colSpan={13} className="emptyState">
                         Ainda nenhum jogador atingiu o mínimo de {reducedRankingMinGames} jogos.
                       </td>
                     </tr>
@@ -1214,6 +1226,7 @@ function AppRoot() {
                       <span><b>{r.wins}</b> V</span>
                       <span><b>{r.draws}</b> E</span>
                       <span><b>{r.losses}</b> D</span>
+                      <span><b>{formatGoalDiff(r.goalDiff)}</b> GD</span>
                       <span><b>{r.goals}</b> golos</span>
                       <span><b>{r.assists}</b> assist.</span>
                       <span><b>{r.mvps}</b> MVP</span>
@@ -1342,6 +1355,7 @@ function AppRoot() {
                     <th>V</th>
                     <th>E</th>
                     <th>D</th>
+                    <th>GD</th>
                     <th>Golos</th>
                     <th>Assist.</th>
                     <th>MVP</th>
@@ -1355,6 +1369,7 @@ function AppRoot() {
                       <td>{r.wins}</td>
                       <td>{r.draws}</td>
                       <td>{r.losses}</td>
+                      <td>{formatGoalDiff(r.goalDiff)}</td>
                       <td>{r.goals}</td>
                       <td>{r.assists}</td>
                       <td>{r.mvps}</td>
@@ -1362,7 +1377,7 @@ function AppRoot() {
                   ))}
                   {statsForPlayers().length === 0 && (
                     <tr>
-                      <td colSpan={8} className="emptyState">
+                      <td colSpan={9} className="emptyState">
                         Nenhum jogador cumpre estes filtros.
                       </td>
                     </tr>

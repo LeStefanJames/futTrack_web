@@ -50,7 +50,7 @@ const DEFAULT_CONFIG = {
 // ver o resto (J, V, E, D, Score...); "cards" troca a tabela por um cartão
 // empilhado por jogador (sem scroll horizontal nenhum). Muda este valor e
 // recarrega a página para experimentar o outro.
-const RANKING_MOBILE_LAYOUT = "cards"; // "frozen" | "cards"
+const RANKING_MOBILE_LAYOUT = "frozen"; // "frozen" | "cards"
 
 // Inputs com estado local: enquanto escreves, só o próprio campo re-renderiza
 // (rápido). O valor só é gravado na app (e na rede) quando sais do campo —
@@ -162,6 +162,7 @@ function emptyGame(count) {
     stats: {},
     mvpVotes: [], // { voterId, votedForId }
     votingDeadline: null,
+    spectators: [], // player ids: registered players who didn't play but can vote for MVP
   };
 }
 
@@ -527,7 +528,8 @@ function AppRoot() {
   const [votingAs, setVotingAs] = useState(null);
   const [voteChoice, setVoteChoice] = useState(null);
   const [gkWarning, setGkWarning] = useState("");
-  const [rankingView, setRankingView] = useState("full");
+  const [rankingView, setRankingView] = useState("reduzido"); //"full" - toggle to show full ranking
+  const [rankingNameCompressed, setRankingNameCompressed] = useState(false);
 
   const [filters, setFilters] = useState({
     from: "",
@@ -774,7 +776,26 @@ function AppRoot() {
       mvpVotes: [...g.mvpVotes.filter((v) => v.voterId !== voterId), { voterId, votedForId }],
     }));
     setVoteChoice(null);
-    setEditingVote(false);
+  }
+
+  function addSpectator(gameId, playerId) {
+    updateGame(gameId, (g) => {
+      const spectators = g.spectators || [];
+      if (g.convocados.includes(playerId) || spectators.includes(playerId)) return g;
+      return { ...g, spectators: [...spectators, playerId] };
+    });
+  }
+
+  function removeSpectator(gameId, playerId) {
+    updateGame(gameId, (g) => ({
+      ...g,
+      spectators: (g.spectators || []).filter((id) => id !== playerId),
+      mvpVotes: g.mvpVotes.filter((v) => v.voterId !== playerId),
+    }));
+    if (votingAs === playerId) {
+      setVotingAs(null);
+      setVoteChoice(null);
+    }
   }
 
   function finalizeGame(gameId) {
@@ -1059,6 +1080,8 @@ function AppRoot() {
                   setVotingAs={setVotingAs}
                   setVoteChoice={setVoteChoice}
                   onSubmitVote={(voterId, votedForId) => submitVote(g.id, voterId, votedForId)}
+                  onAddSpectator={(pid) => addSpectator(g.id, pid)}
+                  onRemoveSpectator={(pid) => removeSpectator(g.id, pid)}
                   onOpenVoting={() => openVoting(g.id)}
                   onFinalize={() => finalizeGame(g.id)}
                   onReopen={() => reopenGame(g.id)}
@@ -1081,7 +1104,10 @@ function AppRoot() {
               {rankingView === "reduzido" ? "Mostrar Ranking Completo" : "Mostrar Ranking Reduzido"}
             </button>
             <p className="hint">Score de 0 a 10, calculado a partir de vitórias, empates, derrotas, golos, assistências e prémios de MVP.</p>
-            <div className={"tableWrap" + (RANKING_MOBILE_LAYOUT === "cards" ? " tableWrapCardsMode" : "")}>
+            <div
+              className={"tableWrap" + (RANKING_MOBILE_LAYOUT === "cards" ? " tableWrapCardsMode" : "")}
+              onScroll={(e) => setRankingNameCompressed(e.currentTarget.scrollLeft > 8)}
+            >
               <table className={"table" + (RANKING_MOBILE_LAYOUT === "frozen" ? " rankingFrozen" : "")}>
                 <thead>
                   <tr>
@@ -1113,8 +1139,8 @@ function AppRoot() {
                           <PlayerAvatar photo={r.player.photo} size={32} alt={r.player.name} />
                         </button>
                       </td>
-                      <td>
-                        {r.player.name}
+                      <td className={"rankingNameCell" + (rankingNameCompressed ? " rankingNameCellCompressed" : "")}>
+                        {rankingNameCompressed ? r.player.name.trim().slice(0, 3) : r.player.name}
                         {r.player.isGK && <span className="tagGK">GR</span>}
                       </td>
                       <td className="scoreCell">{r.norm.toFixed(1)}</td>
@@ -1167,10 +1193,18 @@ function AppRoot() {
                         {r.player.name}
                         {r.player.isGK && <span className="tagGK">GR</span>}
                       </span>
-                      <span className="rankingCardScore">{r.norm.toFixed(1)}</span>
+                      <div className="rankingCardHighlights">
+                        <div className="rankingCardHighlight">
+                          <span className="rankingCardHighlightLabel">Score</span>
+                          <span className="rankingCardScore">{r.norm.toFixed(1)}</span>
+                        </div>
+                        <div className="rankingCardHighlight">
+                          <span className="rankingCardHighlightLabel">Valor</span>
+                          <span className="rankingCardScore">{formatMarketValue(marketValue(r.norm))}</span>
+                        </div>
+                      </div>
                     </div>
                     <div className="rankingCardStats">
-                      <span><b>{formatMarketValue(marketValue(r.norm))}</b> valor</span>
                       <span><b>{r.games}</b> J</span>
                       <span><b>{r.wins}</b> V</span>
                       <span><b>{r.draws}</b> E</span>
@@ -1479,6 +1513,8 @@ function GameCard(props) {
       setVotingAs,
       setVoteChoice,
       onSubmitVote,
+      onAddSpectator,
+      onRemoveSpectator,
       onOpenVoting,
       onFinalize,
       onReopen,
@@ -1489,6 +1525,12 @@ function GameCard(props) {
     } = props;
 
     const [selectedSwap, setSelectedSwap] = useState(null);
+    const [addingSpectator, setAddingSpectator] = useState(false);
+
+    const spectators = g.spectators || [];
+    const eligibleSpectators = activePlayers.filter(
+      (p) => !g.convocados.includes(p.id) && !spectators.includes(p.id)
+    );
 
     const statusLabel = {
       setup: "convocatória",
@@ -1800,9 +1842,114 @@ function GameCard(props) {
                           })}
                         </ul>
                         <p className="hint">
-                          {g.mvpVotes.length} de {g.convocados.length} já votaram. Só se vê o resultado final — nunca
-                          em quem cada pessoa votou.
+                          {g.mvpVotes.length} de {g.convocados.length + spectators.length} já votaram. Só se vê o
+                          resultado final — nunca em quem cada pessoa votou.
                         </p>
+
+                        <div className="spectatorsSection">
+                          <h4 className="spectatorsTitle">Espectadores</h4>
+                          <p className="hint">
+                            Jogadores registados que não jogaram este jogo, mas podem votar no MVP.
+                          </p>
+                          {spectators.length > 0 && (
+                            <ul className="voteList">
+                              {spectators.map((pid) => {
+                                const voted = g.mvpVotes.some((v) => v.voterId === pid);
+                                return (
+                                  <li key={pid} className="voteRow">
+                                    <span className="nameWithAvatar">
+                                      <PlayerAvatar
+                                        photo={(players.find((x) => x.id === pid) || {}).photo}
+                                        size={22}
+                                        alt={playerName(pid)}
+                                      />
+                                      {playerName(pid)}
+                                      <span className="tagSpectator">espectador</span>
+                                    </span>
+                                    <span className="spectatorRowActions">
+                                      {voted ? (
+                                        <span className="votedTag">✔ votou</span>
+                                      ) : votingAs === pid ? (
+                                        <span className="voteFormInline">
+                                          <select
+                                            className="input"
+                                            value={voteChoice || ""}
+                                            onChange={(e) => setVoteChoice(e.target.value)}
+                                          >
+                                            <option value="">Escolhe o MVP…</option>
+                                            {g.convocados.map((otherId) => (
+                                              <option key={otherId} value={otherId}>
+                                                {playerName(otherId)}
+                                              </option>
+                                            ))}
+                                          </select>
+                                          <button
+                                            className="btn btnPrimary"
+                                            disabled={!voteChoice}
+                                            onClick={() => onSubmitVote(pid, voteChoice)}
+                                          >
+                                            Confirmar
+                                          </button>
+                                          <button
+                                            className="btn btnGhost"
+                                            onClick={() => {
+                                              setVotingAs(null);
+                                              setVoteChoice(null);
+                                            }}
+                                          >
+                                            Cancelar
+                                          </button>
+                                        </span>
+                                      ) : (
+                                        <button
+                                          className="btn btnGhost"
+                                          onClick={() => {
+                                            setVotingAs(pid);
+                                            setVoteChoice(null);
+                                          }}
+                                        >
+                                          Votar
+                                        </button>
+                                      )}
+                                      <button className="btn btnGhost" onClick={() => onRemoveSpectator(pid)}>
+                                        Remover espectador
+                                      </button>
+                                    </span>
+                                  </li>
+                                );
+                              })}
+                            </ul>
+                          )}
+
+                          {addingSpectator ? (
+                            <div className="addSpectatorPanel">
+                              {eligibleSpectators.length === 0 ? (
+                                <p className="hint">Não há mais jogadores para adicionar como espectadores.</p>
+                              ) : (
+                                <ul className="addSpectatorList">
+                                  {eligibleSpectators.map((p) => (
+                                    <li key={p.id}>
+                                      <span className="nameWithAvatar">
+                                        <PlayerAvatar photo={p.photo} size={22} alt={p.name} />
+                                        {p.name}
+                                      </span>
+                                      <button className="btn btnGhost" onClick={() => onAddSpectator(p.id)}>
+                                        + Adicionar
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                              <button className="btn btnGhost" onClick={() => setAddingSpectator(false)}>
+                                Fechar
+                              </button>
+                            </div>
+                          ) : (
+                            <button className="btn btnGhost" onClick={() => setAddingSpectator(true)}>
+                              + Adicionar espectador
+                            </button>
+                          )}
+                        </div>
                       </>
                     )}
                   </>
@@ -2369,6 +2516,21 @@ html, body {
   }
 }
 
+/* Nome do jogador encolhe para 3 letras enquanto a tabela "rankingFrozen" é
+   deslizada para a direita, para não ocupar metade do ecrã em mobile. */
+.rankingNameCell {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: max-width 0.15s ease;
+}
+
+.rankingNameCellCompressed {
+  max-width: 2.4rem;
+  text-transform: uppercase;
+}
+
 /* Modo "cards" (RANKING_MOBILE_LAYOUT): em ecrãs pequenos a tabela some e
    entra uma lista de cartões empilhados, sem scroll horizontal nenhum. */
 .rankingCards { display: none; list-style: none; margin: 0.5rem 0 0 0; padding: 0; flex-direction: column; gap: 0.5rem; }
@@ -2385,11 +2547,17 @@ html, body {
   padding: 0.6rem 0.75rem;
 }
 
-.rankingCardHeader { display: flex; align-items: center; gap: 0.5rem; }
+.rankingCardHeader { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; }
 
 .rankingCardPos { color: #93A399; font-family: 'Bebas Neue', sans-serif; font-size: 1.1rem; width: 1.6rem; }
 
 .rankingCardName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+
+.rankingCardHighlights { display: flex; gap: 0.9rem; width: 100%; justify-content: flex-end; }
+
+.rankingCardHighlight { display: flex; flex-direction: column; align-items: flex-end; }
+
+.rankingCardHighlightLabel { font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.04em; color: #93A399; }
 
 .rankingCardScore { font-family: 'Bebas Neue', sans-serif; font-size: 1.2rem; color: #E8A33D; }
 
@@ -2441,6 +2609,45 @@ html, body {
 .votedTag { color: #9AD6AE; font-size: 0.85rem; }
 
 .voteFormInline { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+
+.spectatorsSection {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #2A3831;
+}
+
+.spectatorsTitle { margin: 0 0 0.2rem 0; font-size: 0.95rem; color: #B7C4BB; }
+
+.tagSpectator {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #93A399;
+  border: 1px solid #3A4A41;
+  border-radius: 4px;
+  padding: 0.05rem 0.3rem;
+}
+
+.spectatorRowActions { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+
+.addSpectatorPanel {
+  margin-top: 0.5rem;
+  background: #1C2A24;
+  border: 1px solid #2A3831;
+  border-radius: 6px;
+  padding: 0.6rem 0.75rem;
+}
+
+.addSpectatorList { list-style: none; margin: 0 0 0.5rem 0; padding: 0; }
+
+.addSpectatorList li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.3rem 0;
+  border-bottom: 1px dashed #2A3831;
+  gap: 0.5rem;
+}
 
 .mvpResult { color: #F2C97D; font-weight: 600; }
 

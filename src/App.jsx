@@ -50,7 +50,7 @@ const DEFAULT_CONFIG = {
 // ver o resto (J, V, E, D, Score...); "cards" troca a tabela por um cartão
 // empilhado por jogador (sem scroll horizontal nenhum). Muda este valor e
 // recarrega a página para experimentar o outro.
-const RANKING_MOBILE_LAYOUT = "cards"; // "frozen" | "cards"
+const RANKING_MOBILE_LAYOUT = "frozen"; // "frozen" | "cards"
 
 // Inputs com estado local: enquanto escreves, só o próprio campo re-renderiza
 // (rápido). O valor só é gravado na app (e na rede) quando sais do campo —
@@ -239,7 +239,11 @@ const GOAL_DIFF_SATURATION = 5;
 const STAT_CORRECTION_CAP = 0.4;
 // Controla a dificuldade de chegar a 0 ou 10: só desempenhos muito acima/
 // abaixo da média do GRUPO é que se aproximam dos extremos (ver sigmoide mais abaixo).
-const RATING_CURVE_STEEPNESS = 0.55;
+// Assimétrico de propósito: quem está acima da média separa-se mais depressa
+// (um "crack" não deve empurrar os outros bons jogadores para perto da média
+// só por ser ainda melhor); abaixo da média mantém-se a curva mais suave.
+const RATING_CURVE_STEEPNESS_BELOW_AVG = 0.55;
+const RATING_CURVE_STEEPNESS_ABOVE_AVG = 1.5;
 
 // Contributo de UM jogo, COM SINAL (positivo ajuda, negativo prejudica) — já
 // não é 0-10, é só o valor bruto antes de comparar o jogador com o resto do
@@ -373,7 +377,8 @@ function computeRanking(players, games, config) {
     const z = stdDev > 0 ? (r.smoothed - groupMean) / stdDev : 0;
     // Sigmoide: achata perto de 0 e de 10 — esses extremos só saem com
     // desempenhos muito destacados acima/abaixo do grupo (difícil de atingir).
-    r.norm = 10 / (1 + Math.exp(-RATING_CURVE_STEEPNESS * z));
+    const steepness = z >= 0 ? RATING_CURVE_STEEPNESS_ABOVE_AVG : RATING_CURVE_STEEPNESS_BELOW_AVG;
+    r.norm = 10 / (1 + Math.exp(-steepness * z));
   });
 
   return map;

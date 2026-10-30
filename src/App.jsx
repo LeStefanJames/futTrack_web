@@ -39,11 +39,21 @@ class ErrorBoundary extends Component {
 }
 
 const DEFAULT_CONFIG = {
-  weights: { win: 3, draw: 1, loss: 2, goal: 0.5, assist: 0.3, mvp: 2 },
+  weights: { win: 3, draw: 1, loss: 2, goal: 0.5, assist: 0.3, mvp: 2, conceded: 2 },
   // Precisa de mais jogos para atingir confiança total — evita que 1-2 jogos
   // bons (ou maus) disparem logo alguém para o topo/fundo da tabela.
   confidenceGames: 7,
 };
+
+// Preenche pesos em falta (ex: configs gravadas antes de existir o peso
+// "conceded") com o valor por omissão, sem apagar o que o utilizador já afinou.
+function normalizeConfig(rawConfig) {
+  return {
+    ...DEFAULT_CONFIG,
+    ...(rawConfig || {}),
+    weights: { ...DEFAULT_CONFIG.weights, ...((rawConfig && rawConfig.weights) || {}) },
+  };
+}
 
 // Duas formas de tornar o Ranking usável em ecrãs pequenos, à escolha:
 // "frozen" fixa as colunas #/foto/jogador à esquerda enquanto deslizas para
@@ -245,24 +255,51 @@ const STAT_CORRECTION_CAP = 0.4;
 const RATING_CURVE_STEEPNESS_BELOW_AVG = 0.55;
 const RATING_CURVE_STEEPNESS_ABOVE_AVG = 1.5;
 
+// Guarda-redes quase não marcam/assistem, por isso cada golo/assistência seu
+// vale bem mais do que o de um jogador de linha.
+const GK_STAT_MULTIPLIER = 3;
+// Para guarda-redes, golos sofridos/MVP pesam quase tanto como vitória/derrota
+// (em vez do corretor limitado a 40% usado para jogadores de linha).
+const GK_STAT_CORRECTION_CAP = 1;
+// Golos sofridos a partir dos quais já não há mais penalização a somar.
+const CONCEDED_SATURATION = 5;
+
 // Contributo de UM jogo, COM SINAL (positivo ajuda, negativo prejudica) — já
 // não é 0-10, é só o valor bruto antes de comparar o jogador com o resto do
 // grupo (ver computeRanking). Vitória/derrota mandam, pesadas pela diferença
 // de golos; golos/assistências/MVP são só um corretor por cima, nunca
 // descontam por um jogador não ter pontuado (nem todos marcam golos).
-function perGameSignal(w, resultKind, goals, assists, mvpVoteShare, goalDiff) {
+function perGameSignal(w, resultKind, goals, assists, mvpVoteShare, goalDiff, isGK, conceded) {
   const diffFactor = Math.min(1, Math.sqrt((goalDiff || 0) / GOAL_DIFF_SATURATION));
   const resultSignal =
     resultKind === "win" ? w.win * diffFactor : resultKind === "loss" ? -w.loss * diffFactor : w.draw;
 
   const goalScore01 = Math.min(1, Math.sqrt(goals / GOAL_SATURATION));
   const assistScore01 = Math.min(1, Math.sqrt(assists / ASSIST_SATURATION));
+  const resultMagnitude = (w.win + w.loss) / 2 || 1;
+
+  if (isGK) {
+    // Sofrer poucos golos conta bastante (baliza a zeros bem premiada), mas
+    // sofrer muitos não pune tanto — raramente é só culpa do guarda-redes.
+    const concededGoodness = Math.max(0, 1 - (conceded || 0) / CONCEDED_SATURATION);
+    const concededScore01 = Math.sqrt(concededGoodness);
+    const goalW = w.goal * GK_STAT_MULTIPLIER;
+    const assistW = w.assist * GK_STAT_MULTIPLIER;
+    const statWeightSum = goalW + assistW + w.mvp + w.conceded;
+    const statShare =
+      statWeightSum > 0
+        ? (goalW * goalScore01 + assistW * assistScore01 + w.mvp * mvpVoteShare + w.conceded * concededScore01) /
+          statWeightSum
+        : 0;
+    const statBonus = statShare * GK_STAT_CORRECTION_CAP * resultMagnitude;
+    return resultSignal + statBonus;
+  }
+
   const statWeightSum = w.goal + w.assist + w.mvp;
   const statShare =
     statWeightSum > 0
       ? (w.goal * goalScore01 + w.assist * assistScore01 + w.mvp * mvpVoteShare) / statWeightSum
       : 0;
-  const resultMagnitude = (w.win + w.loss) / 2 || 1;
   const statBonus = statShare * STAT_CORRECTION_CAP * resultMagnitude;
 
   return resultSignal + statBonus;
@@ -272,6 +309,10 @@ function computeRanking(players, games, config) {
   const w = config.weights;
   const DECAY = 0.85; // cada jogo mais antigo pesa 85% do seguinte
   const map = {};
+  const playerById = {};
+  players.forEach((p) => {
+    playerById[p.id] = p;
+  });
   players.forEach((p) => {
     map[p.id] = {
       id: p.id,
@@ -332,7 +373,9 @@ function computeRanking(players, games, config) {
       const goalDiff = Math.abs(scoreA - scoreB);
       if (inA) m.goalDiff += scoreA - scoreB;
       else if (inB) m.goalDiff += scoreB - scoreA;
-      m.perGame.push(perGameSignal(w, resultKind, goals, assists, mvpVoteShare, goalDiff));
+      const isGK = !!(playerById[pid] && playerById[pid].isGK);
+      const conceded = inA ? scoreB : inB ? scoreA : 0;
+      m.perGame.push(perGameSignal(w, resultKind, goals, assists, mvpVoteShare, goalDiff, isGK, conceded));
     });
   });
 
@@ -454,6 +497,29 @@ function twoOptBalance(idsA, idsB, scoreFn) {
   return { a, b };
 }
 
+// Máximo de convocados por jogo — acima disto, só os mais assíduos entram
+// (ver pickConvocadosWithinLimit).
+const MAX_CONVOCADOS = 10;
+
+// Com mais convocados do que o limite, mantém só os N com mais jogos
+// (critério principal: assiduidade). Empates desempatam por score, depois
+// golos, assistências e MVPs — por essa ordem.
+function pickConvocadosWithinLimit(convocadoIds, rankingMap, limit) {
+  if (convocadoIds.length <= limit) return { kept: convocadoIds, excluded: [] };
+  const sorted = [...convocadoIds].sort((idA, idB) => {
+    const a = rankingMap[idA] || {};
+    const b = rankingMap[idB] || {};
+    return (
+      (b.games || 0) - (a.games || 0) ||
+      (b.norm || 0) - (a.norm || 0) ||
+      (b.goals || 0) - (a.goals || 0) ||
+      (b.assists || 0) - (a.assists || 0) ||
+      (b.mvps || 0) - (a.mvps || 0)
+    );
+  });
+  return { kept: sorted.slice(0, limit), excluded: sorted.slice(limit) };
+}
+
 function gerarEquipas(convocadoIds, players, rankingMap) {
   const byId = Object.fromEntries(players.map((p) => [p.id, p]));
   const convocados = convocadoIds.map((id) => byId[id]).filter(Boolean);
@@ -543,6 +609,7 @@ function AppRoot() {
   const [votingAs, setVotingAs] = useState(null);
   const [voteChoice, setVoteChoice] = useState(null);
   const [gkWarning, setGkWarning] = useState("");
+  const [excludedNotice, setExcludedNotice] = useState(null); // { names: string[] } | null
   const [rankingView, setRankingView] = useState("reduzido"); //"full" - toggle to show full ranking
   const [rankingNameCompressed, setRankingNameCompressed] = useState(false);
 
@@ -574,7 +641,7 @@ function AppRoot() {
         "postgres_changes",
         { event: "UPDATE", schema: "public", table: "app_state", filter: `id=eq.${STATE_ROW_ID}` },
         (payload) => {
-          const next = payload.new.data;
+          const next = { ...payload.new.data, config: normalizeConfig(payload.new.data.config) };
           setData(next);
           setWeightsDraft(next.config.weights);
           setConfDraft(next.config.confidenceGames || 5);
@@ -599,7 +666,7 @@ function AppRoot() {
       const next = {
         players: parsed.players || [],
         games: parsed.games || [],
-        config: parsed.config || DEFAULT_CONFIG,
+        config: normalizeConfig(parsed.config),
       };
       setData(next);
       setWeightsDraft(next.config.weights);
@@ -744,10 +811,16 @@ function AppRoot() {
   }
 
   function gerarEquipasParaJogo(gameId) {
+    const game = games.find((g) => g.id === gameId);
+    if (!game) return;
+    const { kept, excluded } = pickConvocadosWithinLimit(game.convocados, rankingMap, MAX_CONVOCADOS);
     updateGame(gameId, (g) => {
-      const { teamA, teamB } = gerarEquipas(g.convocados, players, rankingMap);
-      return { ...g, teamA, teamB, status: "equipas" };
+      const { teamA, teamB } = gerarEquipas(kept, players, rankingMap);
+      return { ...g, convocados: kept, teamA, teamB, status: "equipas" };
     });
+    if (excluded.length > 0) {
+      setExcludedNotice({ names: excluded.map(playerName) });
+    }
   }
 
   function swapPlayers(gameId, idA, idB) {
@@ -863,7 +936,7 @@ function AppRoot() {
       const next = {
         players: parsed.players,
         games: parsed.games,
-        config: parsed.config || DEFAULT_CONFIG,
+        config: normalizeConfig(parsed.config),
       };
       persist(next);
       setWeightsDraft(next.config.weights);
@@ -1330,6 +1403,7 @@ function AppRoot() {
                     <option value="games">Jogos</option>
                     <option value="mvps">MVPs</option>
                     <option value="norm">Score</option>
+                    <option value="goalDiff">Diferença de golos</option>
                   </select>
                 </div>
               </div>
@@ -1404,6 +1478,7 @@ function AppRoot() {
                   ["goal", "Golo"],
                   ["assist", "Assistência"],
                   ["mvp", "Prémio MVP"],
+                  ["conceded", "Golos sofridos (guarda-redes)"],
                 ].map(([key, label]) => (
                   <div className="field" key={key}>
                     <label>{label}</label>
@@ -1507,6 +1582,28 @@ function AppRoot() {
           </div>
         </div>
       )}
+
+      {excludedNotice && (
+        <div className="modalOverlay" onClick={() => setExcludedNotice(null)}>
+          <div className="modalBox" onClick={(e) => e.stopPropagation()}>
+            <div className="modalHeaderRow">
+              <h3>Jogadores excluídos</h3>
+              <button className="modalCloseBtn" aria-label="Fechar" onClick={() => setExcludedNotice(null)}>
+                ×
+              </button>
+            </div>
+            <p className="hint">
+              Havia mais de {MAX_CONVOCADOS} convocados — ficaram de fora por terem menos jogos (em
+              caso de empate, desempata o score, depois golos/assistências/MVPs):
+            </p>
+            <ul className="excludedList">
+              {excludedNotice.names.map((name, i) => (
+                <li key={i}>{name}</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1546,6 +1643,7 @@ function GameCard(props) {
 
     const [selectedSwap, setSelectedSwap] = useState(null);
     const [addingSpectator, setAddingSpectator] = useState(false);
+    const [resultWarning, setResultWarning] = useState(null);
 
     const spectators = g.spectators || [];
     const eligibleSpectators = activePlayers.filter(
@@ -1583,6 +1681,34 @@ function GameCard(props) {
       setSelectedSwap(null);
     }
 
+    // Verifica se golos/assistências batem certo com o resultado antes de
+    // abrir a votação — só avisa, nunca bloqueia (podem ser golos próprios,
+    // ou alguém esqueceu-se de apontar a estatística).
+    function sumStat(teamIds, field) {
+      return teamIds.reduce((s, pid) => s + Number((g.stats[pid] && g.stats[pid][field]) || 0), 0);
+    }
+
+    function handleConfirmResultado() {
+      const scoreA = Number(g.score.a) || 0;
+      const scoreB = Number(g.score.b) || 0;
+      const goalsA = sumStat(g.teamA, "goals");
+      const goalsB = sumStat(g.teamB, "goals");
+      const assistsA = sumStat(g.teamA, "assists");
+      const assistsB = sumStat(g.teamB, "assists");
+
+      const looksSwapped =
+        scoreA !== scoreB && goalsA !== goalsB && Math.sign(goalsA - goalsB) !== Math.sign(scoreA - scoreB);
+      const doesntAddUp = goalsA !== scoreA || goalsB !== scoreB || assistsA !== scoreA || assistsB !== scoreB;
+
+      if (looksSwapped) {
+        setResultWarning("Provavelmente meteste o resultado ao contrário!!!!");
+      } else if (doesntAddUp) {
+        setResultWarning("Falta apontar golos ou assists de pelo menos uma equipa");
+      } else {
+        onOpenVoting();
+      }
+    }
+
     return (
       <li className="gameCard">
         <div className="gameCardHeader" onClick={onToggleOpen}>
@@ -1612,6 +1738,10 @@ function GameCard(props) {
               <>
                 <h3>Convocatória</h3>
                 <p className="hint">Máximo de 2 guarda-redes por jogo (um para cada equipa).</p>
+                <p className="hint">
+                  Se convocares mais de {MAX_CONVOCADOS}, só entram os {MAX_CONVOCADOS} com mais jogos
+                  (desempate por score, golos, assistências e MVPs).
+                </p>
                 <ul className="convocaList">
                   {activePlayers.map((p) => (
                     <li key={p.id}>
@@ -1754,7 +1884,7 @@ function GameCard(props) {
                 </div>
 
                 {g.status === "jogo" && (
-                  <button className="btn btnPrimary" onClick={onOpenVoting}>
+                  <button className="btn btnPrimary" onClick={handleConfirmResultado}>
                     Confirmar resultado e abrir votação MVP (24h)
                   </button>
                 )}
@@ -1931,8 +2061,11 @@ function GameCard(props) {
                                           Votar
                                         </button>
                                       )}
-                                      <button className="btn btnGhost" onClick={() => onRemoveSpectator(pid)}>
-                                        Remover espectador
+                                      <button
+                                        className="btn btnGhost btnTiny removeSpectatorBtn"
+                                        onClick={() => onRemoveSpectator(pid)}
+                                      >
+                                        Remover
                                       </button>
                                     </span>
                                   </li>
@@ -1965,7 +2098,10 @@ function GameCard(props) {
                               </button>
                             </div>
                           ) : (
-                            <button className="btn btnGhost" onClick={() => setAddingSpectator(true)}>
+                            <button
+                              className="btn btnGhost btnBlock addSpectatorBtn"
+                              onClick={() => setAddingSpectator(true)}
+                            >
                               + Adicionar espectador
                             </button>
                           )}
@@ -1975,15 +2111,29 @@ function GameCard(props) {
                   </>
                 )}
 
-                {g.status === "votacao" && (
-                  <button className="btn btnGhost" onClick={onFinalize}>
-                    Terminar votação agora
-                  </button>
-                )}
                 {(g.status === "votacao" || g.status === "finalizado") && (
-                  <button className="btn btnGhost" onClick={onReopen}>
-                    Reabrir para corrigir resultado
-                  </button>
+                  <div className="gameFooterActions">
+                    {g.status === "votacao" && (
+                      <div className="footerActionRow">
+                        <div className="footerActionInfo">
+                          <strong>Terminar votação agora</strong>
+                          <p className="hint">Fecha a votação já, sem esperar pelo prazo de 24h.</p>
+                        </div>
+                        <button className="btn btnGhost" onClick={onFinalize}>
+                          Terminar votação
+                        </button>
+                      </div>
+                    )}
+                    <div className="footerActionRow">
+                      <div className="footerActionInfo">
+                        <strong>Reabrir jogo</strong>
+                        <p className="hint">Volta atrás para corrigir o resultado ou as estatísticas.</p>
+                      </div>
+                      <button className="btn btnGhost" onClick={onReopen}>
+                        Reabrir para corrigir resultado
+                      </button>
+                    </div>
+                  </div>
                 )}
               </>
             )}
@@ -2004,6 +2154,29 @@ function GameCard(props) {
                   Apagar jogo
                 </button>
               )}
+            </div>
+          </div>
+        )}
+
+        {resultWarning && (
+          <div className="modalOverlay" onClick={() => setResultWarning(null)}>
+            <div className="modalBox" onClick={(e) => e.stopPropagation()}>
+              <h3>Confirma o resultado?</h3>
+              <p className="warningText">{resultWarning}</p>
+              <div className="modalActionsRow">
+                <button className="btn btnGhost" onClick={() => setResultWarning(null)}>
+                  Corrigir
+                </button>
+                <button
+                  className="btn btnPrimary"
+                  onClick={() => {
+                    setResultWarning(null);
+                    onOpenVoting();
+                  }}
+                >
+                  Continuar mesmo assim
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -2353,6 +2526,63 @@ html, body {
   letter-spacing: 0.02em;
 }
 
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 15, 13, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  padding: 1.5rem;
+}
+
+.modalBox {
+  background: #15201C;
+  border: 1px solid rgba(242, 239, 228, 0.15);
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  max-width: 360px;
+  width: 100%;
+}
+
+.modalHeaderRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.modalHeaderRow h3 {
+  margin: 0;
+}
+
+.modalCloseBtn {
+  background: none;
+  border: none;
+  color: #F2EFE4;
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 0.25rem;
+}
+
+.excludedList {
+  margin: 0.75rem 0 0;
+  padding-left: 1.2rem;
+}
+
+.excludedList li {
+  margin-bottom: 0.3rem;
+}
+
+.modalActionsRow {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
 .tagGK {
   background: #2E8B87;
   color: #F2EFE4;
@@ -2653,10 +2883,19 @@ html, body {
   padding: 0.05rem 0.3rem;
 }
 
-.spectatorRowActions { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.spectatorRowActions { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+
+.removeSpectatorBtn {
+  color: #93A399;
+  border-color: #2A3831;
+}
+
+.addSpectatorBtn { margin-top: 0.75rem; }
+
+.btnBlock { display: block; width: 100%; text-align: center; }
 
 .addSpectatorPanel {
-  margin-top: 0.5rem;
+  margin-top: 0.75rem;
   background: #1C2A24;
   border: 1px solid #2A3831;
   border-radius: 6px;
@@ -2696,6 +2935,26 @@ html, body {
 }
 
 .presetRow { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+.gameFooterActions {
+  margin-top: 1.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #2A3831;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.footerActionRow {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.footerActionInfo strong { display: block; }
+.footerActionInfo p { margin: 0.15rem 0 0; }
 
 
 

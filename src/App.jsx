@@ -153,6 +153,21 @@ function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }
 
+// Prefixos trocistas para os avisos de resultado — picardia pedida pelo utilizador.
+const FUNNY_WARNING_PREFIXES = [
+  "És um nabo, ",
+  "Seu burro, ",
+  "Ó badocha, ",
+  "Trapalhão, ",
+  "Ó cromo, ",
+  "Macacos me mordam, ",
+];
+
+function funnyWarning(message) {
+  const prefix = FUNNY_WARNING_PREFIXES[Math.floor(Math.random() * FUNNY_WARNING_PREFIXES.length)];
+  return prefix + message.charAt(0).toLowerCase() + message.slice(1);
+}
+
 function formatDatePT(iso) {
   const [y, m, d] = iso.split("-");
   return `${d}/${m}/${y}`;
@@ -748,7 +763,7 @@ function AppRoot() {
   function addPlayer() {
     const name = newPlayerName.trim();
     if (!name) return;
-    const p = { id: uid(), name, isGK: newPlayerGK, active: true, photo: newPlayerPhoto || null };
+    const p = { id: uid(), name, isGK: newPlayerGK, isInjured: false, active: true, photo: newPlayerPhoto || null };
     persist({ ...data, players: [...players, p] });
     setNewPlayerName("");
     setNewPlayerGK(false);
@@ -774,6 +789,10 @@ function AppRoot() {
 
   function toggleGK(id) {
     persist({ ...data, players: players.map((p) => (p.id === id ? { ...p, isGK: !p.isGK } : p)) });
+  }
+
+  function toggleInjured(id) {
+    persist({ ...data, players: players.map((p) => (p.id === id ? { ...p, isInjured: !p.isInjured } : p)) });
   }
 
   // ---- Jogos ----
@@ -1090,10 +1109,19 @@ function AppRoot() {
                         <span className="playerName">
                           <span className="playerNameText">{p.name}</span>
                           {p.isGK && <span className="tagGK">GR</span>}
+                          {p.isInjured && <span className="tagInjured" title="Lesionado">✚</span>}
                           {p.active === false && <span className="tagInactive">inativo</span>}
                         </span>
                       </div>
                       <span className="playerActions">
+                        <label className="checkboxLabel">
+                          <input
+                            type="checkbox"
+                            checked={!!p.isInjured}
+                            onChange={() => toggleInjured(p.id)}
+                          />
+                          Lesionado
+                        </label>
                         {p.photo && (
                           <button className="btn btnGhost" onClick={() => updatePlayerPhoto(p.id, null)}>
                             Remover foto
@@ -1231,6 +1259,7 @@ function AppRoot() {
                       <td className={"rankingNameCell" + (rankingNameCompressed ? " rankingNameCellCompressed" : "")}>
                         {rankingNameCompressed ? r.player.name.trim().slice(0, 3) : r.player.name}
                         {r.player.isGK && <span className="tagGK">GR</span>}
+                        {r.player.isInjured && <span className="tagInjured" title="Lesionado">✚</span>}
                       </td>
                       <td className="scoreCell">{r.norm.toFixed(1)}</td>
                       <td className="scoreCell">{formatMarketValue(marketValue(r.norm))}</td>
@@ -1282,6 +1311,7 @@ function AppRoot() {
                       <span className="rankingCardName">
                         {r.player.name}
                         {r.player.isGK && <span className="tagGK">GR</span>}
+                        {r.player.isInjured && <span className="tagInjured" title="Lesionado">✚</span>}
                       </span>
                       <div className="rankingCardHighlights">
                         <div className="rankingCardHighlight">
@@ -1438,7 +1468,10 @@ function AppRoot() {
                 <tbody>
                   {statsForPlayers().map((r) => (
                     <tr key={r.player.id}>
-                      <td>{r.player.name}</td>
+                      <td>
+                        {r.player.name}
+                        {r.player.isInjured && <span className="tagInjured" title="Lesionado">✚</span>}
+                      </td>
                       <td>{r.games}</td>
                       <td>{r.wins}</td>
                       <td>{r.draws}</td>
@@ -1699,11 +1732,21 @@ function GameCard(props) {
       const looksSwapped =
         scoreA !== scoreB && goalsA !== goalsB && Math.sign(goalsA - goalsB) !== Math.sign(scoreA - scoreB);
       const doesntAddUp = goalsA !== scoreA || goalsB !== scoreB || assistsA !== scoreA || assistsB !== scoreB;
+      // Impossível: golos/assists de uma equipa não podem exceder o resultado dela — bloqueia sempre.
+      const impossibleStats = goalsA > scoreA || assistsA > scoreA || goalsB > scoreB || assistsB > scoreB;
 
-      if (looksSwapped) {
-        setResultWarning("Provavelmente meteste o resultado ao contrário!!!!");
+      if (impossibleStats) {
+        setResultWarning({
+          text: funnyWarning("Golos ou assists dos players é maior do que o que é possível."),
+          blocking: true,
+        });
+      } else if (looksSwapped) {
+        setResultWarning({ text: funnyWarning("Provavelmente meteste o resultado ao contrário!!!!"), blocking: false });
       } else if (doesntAddUp) {
-        setResultWarning("Falta apontar golos ou assists de pelo menos uma equipa");
+        setResultWarning({
+          text: funnyWarning("Falta apontar golos ou assists de pelo menos uma equipa"),
+          blocking: false,
+        });
       } else {
         onOpenVoting();
       }
@@ -2162,20 +2205,22 @@ function GameCard(props) {
           <div className="modalOverlay" onClick={() => setResultWarning(null)}>
             <div className="modalBox" onClick={(e) => e.stopPropagation()}>
               <h3>Confirma o resultado?</h3>
-              <p className="warningText">{resultWarning}</p>
+              <p className="warningText">{resultWarning.text}</p>
               <div className="modalActionsRow">
                 <button className="btn btnGhost" onClick={() => setResultWarning(null)}>
-                  Corrigir
+                  {resultWarning.blocking ? "Rever resultado" : "Corrigir"}
                 </button>
-                <button
-                  className="btn btnPrimary"
-                  onClick={() => {
-                    setResultWarning(null);
-                    onOpenVoting();
-                  }}
-                >
-                  Continuar mesmo assim
-                </button>
+                {!resultWarning.blocking && (
+                  <button
+                    className="btn btnPrimary"
+                    onClick={() => {
+                      setResultWarning(null);
+                      onOpenVoting();
+                    }}
+                  >
+                    Continuar mesmo assim
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -2590,6 +2635,12 @@ html, body {
   font-weight: 700;
   padding: 0.1rem 0.4rem;
   border-radius: 3px;
+  margin-left: 0.3rem;
+}
+
+.tagInjured {
+  color: #E24C4C;
+  font-weight: 700;
   margin-left: 0.3rem;
 }
 
